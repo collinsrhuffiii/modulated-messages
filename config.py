@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
-path = '/home/ch/Downloads/radio/samples'
-save_samples = False
-debug = True
+path = '/home/ch/src/modulated-messages/samples'
+save_samples = True
+debug = False
 
 # Transmission/Reception Parameters
 transmit_samp_rate = 44100
@@ -19,3 +19,5 @@ packet_id_pos = len_preamble
 packet_fragment_pos = len_preamble + 1
 packet_checksum_pos = len_preamble + 2
 packet_header_len = len_preamble + 3
+
+zmq_path = 'ipc:///home/ch/src/modulated-messages/run/samples'

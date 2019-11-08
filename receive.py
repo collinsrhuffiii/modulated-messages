@@ -6,6 +6,8 @@ import scipy.fftpack
 from rtlsdr import RtlSdr
 import asyncio
 import time
+import zmq
+
 import decode
 import config
 
@@ -103,42 +105,89 @@ def detect_transmission_start(wave, window_size=100,
     return 0
 
 
+def configure_zmq():
+    context = zmq.Context()
+
+    #  Socket to talk to graphing server
+    print("Connecting to graphing server…")
+    socket = context.socket(zmq.PUB)
+    socket.connect(config.zmq_path)
+    return socket
+
+
+def send_array(socket, A, flags=0, copy=True, track=False):
+    """send a numpy array with metadata"""
+    md = dict(
+        dtype=str(A.dtype),
+        shape=A.shape,
+    )
+    socket.send_json(md, flags | zmq.SNDMORE)
+    return socket.send(A, flags, copy=copy, track=track)
+
+
 if __name__ == '__main__':
     samp_per_bit = config.rec_samp_rate/config.baud
     sdr = configure_sdr(config.frequency, config.offset, config.rec_samp_rate)
+    zmq_socket = configure_zmq()
 
     async def streaming():
         fragmented = False
         message = ''
         async for samples in sdr.stream(num_samples_or_bytes=config.rec_samp_rate):
-            if not(detect_transmitter_on(samples, config.rec_samp_rate, config.offset)):
+
+            transmitter_on = detect_transmitter_on(samples,
+                                                   config.rec_samp_rate,
+                                                   config.offset)
+            if not transmitter_on:
                 print('Transmitter off')
-            else:
-                wave, new_samp_rate = fm_demodulate(samples, config.frequency, config.offset, config.rec_samp_rate)
-                samp_per_bit = new_samp_rate/config.baud
-                detected = detect_transmission_present(wave, .5, 1)
-                if detected:
-                    start = detect_transmission_start(wave) - 500
-                    end = len(wave) - detect_transmission_start(wave[::-1]) + 500
+                continue
 
-                    if start >= 0 and end <= len(wave):
-                        smoothed_wave = smooth(np.abs(wave[start:end]), window_len=21, window='flat')
-                        envelope = decode.get_envelope(smoothed_wave)[10:-10]
-                        square_wave = decode.binary_slicer(envelope)
-                        rec_bits = decode.manchester(square_wave, samp_per_bit)
-                        if config.debug:
-                            print(rec_bits)
-                        valid, received_msg, fragmented = decode.demux(rec_bits)
-                        if valid:
-                            if config.save_samples:
-                                np.save(f'samples/rec', samples)
+            wave, new_samp_rate = fm_demodulate(samples,
+                                                config.frequency,
+                                                config.offset,
+                                                config.rec_samp_rate)
 
-                            message += received_msg
-                            if message and not fragmented:
-                                print('Received message:')
-                                print(message)
-                                print()
-                                message = ''
+            samp_per_bit = new_samp_rate/config.baud
+            detected = detect_transmission_present(wave, .5, 1)
+            if not detected:
+                if config.debug:
+                    print('No transmission detected')
+                continue
+
+            # Find start and end of transmission
+            start = detect_transmission_start(wave) - 500
+            end = len(wave) - detect_transmission_start(wave[::-1]) + 500
+            if config.debug:
+                print(start, end)
+
+            if config.debug:
+                print('sending samples:', len(samples[start:end]))
+            send_array(zmq_socket, samples[start:end])
+
+            if start >= 0 and end <= len(wave):
+                smoothed_wave = smooth(np.abs(wave[start:end]),
+                                       window_len=21,
+                                       window='flat')
+
+                envelope = decode.get_envelope(smoothed_wave)[10:-10]
+
+                square_wave = decode.binary_slicer(envelope)
+
+                rec_bits = decode.manchester(square_wave, samp_per_bit)
+
+                if config.debug:
+                    print(rec_bits)
+                valid, received_msg, fragmented = decode.demux(rec_bits)
+                if valid:
+                    if config.save_samples:
+                        np.save(f'samples/rec', samples)
+
+                    message += received_msg
+                    if message and not fragmented:
+                        print('Received message:')
+                        print(message)
+                        print()
+                        message = ''
 
     now = time.time()
     epsilon = .001
